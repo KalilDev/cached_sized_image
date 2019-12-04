@@ -1,7 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/widgets.dart';
-import 'package:flutter_cache_manager/flutter_cache_manager.dart';
+import 'cached_network_image_provider.dart';
+import 'package:transparent_image/transparent_image.dart';
 
 typedef Widget ImageWidgetBuilder(
     BuildContext context, ImageProvider imageProvider);
@@ -10,9 +11,6 @@ typedef Widget LoadingErrorWidgetBuilder(
     BuildContext context, String url, Object error);
 
 class CachedNetworkImage extends StatefulWidget {
-  /// Option to use cachemanager with other settings
-  final BaseCacheManager cacheManager;
-
   /// The target image that is displayed.
   final String imageUrl;
 
@@ -24,9 +22,6 @@ class CachedNetworkImage extends StatefulWidget {
 
   /// Widget displayed while the target [imageUrl] failed loading.
   final LoadingErrorWidgetBuilder errorWidget;
-
-  /// The duration of the fade-in animation for the [placeholder].
-  final Duration placeholderFadeInDuration;
 
   /// The duration of the fade-out animation for the [placeholder].
   final Duration fadeOutDuration;
@@ -109,28 +104,6 @@ class CachedNetworkImage extends StatefulWidget {
   // Optional headers for the http request of the image url
   final Map<String, String> httpHeaders;
 
-  /// When set to true it will animate from the old image to the new image
-  /// if the url changes.
-  final bool useOldImageOnUrlChange;
-
-  /// If non-null, this color is blended with each image pixel using [colorBlendMode].
-  final Color color;
-
-  /// Used to combine [color] with this image.
-  ///
-  /// The default is [BlendMode.srcIn]. In terms of the blend mode, [color] is
-  /// the source and this image is the destination.
-  ///
-  /// See also:
-  ///
-  ///  * [BlendMode], which includes an illustration of the effect of each blend mode.
-  final BlendMode colorBlendMode;
-
-  /// Target the interpolation quality for image scaling.
-  ///
-  /// If not given a value, defaults to FilterQuality.low.
-  final FilterQuality filterQuality;
-
   CachedNetworkImage({
     Key key,
     @required this.imageUrl,
@@ -148,19 +121,12 @@ class CachedNetworkImage extends StatefulWidget {
     this.repeat: ImageRepeat.noRepeat,
     this.matchTextDirection: false,
     this.httpHeaders,
-    this.cacheManager,
-    this.useOldImageOnUrlChange: false,
-    this.color,
-    this.filterQuality: FilterQuality.low,
-    this.colorBlendMode,
-    this.placeholderFadeInDuration,
   })  : assert(imageUrl != null),
         assert(fadeOutDuration != null),
         assert(fadeOutCurve != null),
         assert(fadeInDuration != null),
         assert(fadeInCurve != null),
         assert(alignment != null),
-        assert(filterQuality != null),
         assert(repeat != null),
         assert(matchTextDirection != null),
         super(key: key);
@@ -171,189 +137,54 @@ class CachedNetworkImage extends StatefulWidget {
   }
 }
 
-class _ImageTransitionHolder {
-  final FileInfo image;
-  AnimationController animationController;
-  final Object error;
-  Curve curve;
-  final TickerFuture forwardTickerFuture;
-
-  _ImageTransitionHolder({
-    this.image,
-    @required this.animationController,
-    this.error,
-    this.curve: Curves.easeIn,
-  }) : forwardTickerFuture = animationController.forward();
-
-  dispose() {
-    if (animationController != null) {
-      animationController.dispose();
-      animationController = null;
-    }
-  }
-}
-
 class CachedNetworkImageState extends State<CachedNetworkImage>
     with TickerProviderStateMixin {
-  List<_ImageTransitionHolder> _imageHolders = List();
-  Key _streamBuilderKey = UniqueKey();
-
   @override
   Widget build(BuildContext context) {
     return _animatedWidget();
   }
 
-  @override
-  void didUpdateWidget(CachedNetworkImage oldWidget) {
-    if (oldWidget.imageUrl != widget.imageUrl) {
-      _streamBuilderKey = UniqueKey();
-      if (!widget.useOldImageOnUrlChange) {
-        _disposeImageHolders();
-        _imageHolders.clear();
-      }
-    }
-    super.didUpdateWidget(oldWidget);
-  }
-
-  @override
-  void dispose() {
-    _disposeImageHolders();
-    super.dispose();
-  }
-
-  _disposeImageHolders() {
-    for (var imageHolder in _imageHolders) {
-      imageHolder.dispose();
-    }
-  }
-
-  _addImage({FileInfo image, Object error, Duration duration}) {
-    if (_imageHolders.length > 0) {
-      var lastHolder = _imageHolders.last;
-      lastHolder.forwardTickerFuture.then((_) {
-        if (lastHolder.animationController == null) {
-          return;
-        }
-        if (widget.fadeOutDuration != null) {
-          lastHolder.animationController.duration = widget.fadeOutDuration;
-        } else {
-          lastHolder.animationController.duration = Duration(seconds: 1);
-        }
-        if (widget.fadeOutCurve != null) {
-          lastHolder.curve = widget.fadeOutCurve;
-        } else {
-          lastHolder.curve = Curves.easeOut;
-        }
-        lastHolder.animationController.reverse().then((_) {
-          _imageHolders.remove(lastHolder);
-          if (mounted) setState(() {});
-          return null;
-        });
-      });
-    }
-    _imageHolders.add(
-      _ImageTransitionHolder(
-        image: image,
-        error: error,
-        animationController: AnimationController(
-          vsync: this,
-          duration: duration ??
-              (widget.fadeInDuration ?? Duration(milliseconds: 500)),
-        ),
-      ),
-    );
-  }
-
   _animatedWidget() {
-    var fromMemory = _cacheManager().getFileFromMemory(widget.imageUrl);
+    return LayoutBuilder(builder: (BuildContext context, BoxConstraints constraints) {
+      final Size size = Size(widget.width ?? constraints.biggest.width, widget.height ?? constraints.biggest.height);
+      var error;
+      CachedNetworkImageProvider imgProvider;
+      try {
+        imgProvider = CachedNetworkImageProvider(
+            widget.imageUrl, devicePixelRatio: MediaQuery
+            .of(context)
+            .devicePixelRatio, size: constraints.biggest, headers: widget.httpHeaders);
+      } catch (e) {
+        error = e;
+      }
+      final List<Widget> children = [];
+      if (error != null) {
+        children.add(Align(alignment: widget.alignment,child: _errorWidget(context,error),));
+      } else {
+        children.add(Align(alignment: widget.alignment,child: _placeholder(context),));
+        children.add(_image(context, imgProvider));
+      }
 
-    return StreamBuilder<FileInfo>(
-      key: _streamBuilderKey,
-      initialData: fromMemory,
-      stream: _cacheManager()
-          .getFile(widget.imageUrl, headers: widget.httpHeaders)
-          // ignore errors if not mounted
-          .handleError(() {}, test: (_) => !mounted)
-          .where((f) =>
-              f?.originalUrl != fromMemory?.originalUrl ||
-              f?.validTill != fromMemory?.validTill),
-      builder: (BuildContext context, AsyncSnapshot<FileInfo> snapshot) {
-        if (snapshot.hasError) {
-          // error
-          if (_imageHolders.length == 0 || _imageHolders.last.error == null) {
-            _addImage(image: null, error: snapshot.error);
-          }
-        } else {
-          var fileInfo = snapshot.data;
-          if (fileInfo == null) {
-            // placeholder
-            if (_imageHolders.length == 0 || _imageHolders.last.image != null) {
-              _addImage(
-                  image: null,
-                  duration: widget.placeholderFadeInDuration ?? Duration.zero);
-            }
-          } else if (_imageHolders.length == 0 ||
-              _imageHolders.last.image?.originalUrl != fileInfo.originalUrl ||
-              _imageHolders.last.image?.validTill != fileInfo.validTill) {
-            _addImage(
-                image: fileInfo,
-                duration: _imageHolders.length > 0 ? null : Duration.zero);
-          }
-        }
-
-        var children = <Widget>[];
-        for (var holder in _imageHolders) {
-          if (holder.error != null) {
-            children.add(_transitionWidget(
-                holder: holder, child: _errorWidget(context, holder.error)));
-          } else if (holder.image == null) {
-            children.add(_transitionWidget(
-                holder: holder, child: _placeholder(context)));
-          } else {
-            children.add(_transitionWidget(
-                holder: holder,
-                child: _image(
-                  context,
-                  FileImage(holder.image.file),
-                )));
-          }
-        }
-
-        return Stack(
-          fit: StackFit.passthrough,
-          alignment: widget.alignment,
-          children: children.toList(),
-        );
-      },
-    );
-  }
-
-  Widget _transitionWidget({_ImageTransitionHolder holder, Widget child}) {
-    return FadeTransition(
-      opacity: CurvedAnimation(
-          curve: holder.curve, parent: holder.animationController),
-      child: child,
-    );
-  }
-
-  BaseCacheManager _cacheManager() {
-    return widget.cacheManager ?? DefaultCacheManager();
+      return SizedBox(height: size.height,width: size.width,child: Stack(fit:StackFit.expand, children: children,));
+    });
   }
 
   _image(BuildContext context, ImageProvider imageProvider) {
     return widget.imageBuilder != null
         ? widget.imageBuilder(context, imageProvider)
-        : Image(
+        : FadeInImage(
             image: imageProvider,
             fit: widget.fit,
             width: widget.width,
             height: widget.height,
             alignment: widget.alignment,
             repeat: widget.repeat,
-            color: widget.color,
-            colorBlendMode: widget.colorBlendMode,
+            placeholder: MemoryImage(kTransparentImage),
             matchTextDirection: widget.matchTextDirection,
-            filterQuality: widget.filterQuality,
+            fadeInCurve: widget.fadeInCurve,
+            fadeInDuration: widget.fadeInDuration,
+            fadeOutCurve: widget.fadeOutCurve,
+            fadeOutDuration: widget.fadeOutDuration,
           );
   }
 
